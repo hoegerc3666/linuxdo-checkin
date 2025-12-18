@@ -54,6 +54,8 @@ if not PASSWORD:
 GOTIFY_URL = os.environ.get("GOTIFY_URL")  # Gotify 服务器地址
 GOTIFY_TOKEN = os.environ.get("GOTIFY_TOKEN")  # Gotify 应用的 API Token
 SC3_PUSH_KEY = os.environ.get("SC3_PUSH_KEY")  # Server酱³ SendKey
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")  # Telegram Bot Token
+TELEGRAM_USERID = os.environ.get("TELEGRAM_USERID")  # Telegram User/Chat ID
 
 HOME_URL = "https://linux.do/"
 LOGIN_URL = "https://linux.do/login"
@@ -144,8 +146,6 @@ class LinuxDoBrowser:
             logger.error(f"登录请求异常: {e}")
             return False
 
-        self.print_connect_info()  # 打印连接信息
-
         # Step 3: Pass cookies to DrissionPage
         logger.info("同步 Cookie 到 DrissionPage...")
 
@@ -190,13 +190,9 @@ class LinuxDoBrowser:
 
     def click_topic(self):
         topic_list = self.page.ele("@id=list-area").eles(".:title")
-        if not topic_list:
-            logger.error("未找到主题帖")
-            return False
         logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择10个")
         for topic in random.sample(topic_list, 10):
             self.click_one_topic(topic.attr("href"))
-        return True
 
     @retry_decorator()
     def click_one_topic(self, topic_url):
@@ -238,17 +234,15 @@ class LinuxDoBrowser:
             time.sleep(wait_time)
 
     def run(self):
-        login_res = self.login()
-        if not login_res:  # 登录
-            logger.warning("登录验证失败")
+        if not self.login():  # 登录
+            logger.error("登录失败，程序终止")
+            sys.exit(1)  # 使用非零退出码终止整个程序
 
         if BROWSE_ENABLED:
-            click_topic_res = self.click_topic()  # 点击主题
-            if not click_topic_res:
-                logger.error("点击主题失败，程序终止")
-                return
+            self.click_topic()  # 点击主题
             logger.info("完成浏览任务")
 
+        self.print_connect_info()  # 打印连接信息
         self.send_notifications(BROWSE_ENABLED)  # 发送通知
         self.page.close()
         self.browser.quit()
@@ -269,15 +263,10 @@ class LinuxDoBrowser:
 
     def print_connect_info(self):
         logger.info("获取连接信息")
-        headers = {
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        }
-        resp = self.session.get(
-            "https://connect.linux.do/", headers=headers, impersonate="chrome136"
-        )
+        resp = self.session.get("https://connect.linux.do/", impersonate="chrome136")
         soup = BeautifulSoup(resp.text, "html.parser")
         rows = soup.select("table tr")
-        info = []
+        self.connect_info = []
 
         for row in rows:
             cells = row.select("td")
@@ -285,15 +274,22 @@ class LinuxDoBrowser:
                 project = cells[0].text.strip()
                 current = cells[1].text.strip() if cells[1].text.strip() else "0"
                 requirement = cells[2].text.strip() if cells[2].text.strip() else "0"
-                info.append([project, current, requirement])
+                self.connect_info.append([project, current, requirement])
 
         print("--------------Connect Info-----------------")
-        print(tabulate(info, headers=["项目", "当前", "要求"], tablefmt="pretty"))
+        print(tabulate(self.connect_info, headers=["项目", "当前", "要求"], tablefmt="pretty"))
 
     def send_notifications(self, browse_enabled):
         status_msg = "✅每日登录成功"
         if browse_enabled:
             status_msg += " + 浏览任务完成"
+
+        # 构建连接信息文本
+        connect_info_text = ""
+        if hasattr(self, "connect_info") and self.connect_info:
+            connect_info_text = "\n\n📊 Connect 信息:\n"
+            for item in self.connect_info:
+                connect_info_text += f"• {item[0]}: {item[1]}/{item[2]}\n"
 
         if GOTIFY_URL and GOTIFY_TOKEN:
             try:
@@ -335,6 +331,22 @@ class LinuxDoBrowser:
                         sleep_time = random.randint(180, 360)
                         logger.info(f"将在 {sleep_time} 秒后重试...")
                         time.sleep(sleep_time)
+
+        if TELEGRAM_TOKEN and TELEGRAM_USERID:
+            try:
+                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                data = {
+                    "chat_id": TELEGRAM_USERID,
+                    "text": f"<b>LINUX DO</b>\n{status_msg}{connect_info_text}",
+                    "parse_mode": "HTML",
+                }
+                response = requests.post(url, json=data, timeout=10)
+                response.raise_for_status()
+                logger.success("消息已推送至Telegram")
+            except Exception as e:
+                logger.error(f"Telegram推送失败: {str(e)}")
+        else:
+            logger.info("未配置Telegram环境变量，跳过Telegram通知")
 
 
 if __name__ == "__main__":
